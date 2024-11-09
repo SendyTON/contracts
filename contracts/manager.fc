@@ -1,0 +1,127 @@
+#include "/imports/stdlib.fc";
+
+const op::add_adapter = "op::add_adapter"c;
+const op::remove_adapter = "op::remove_adapter"c;
+const op::receive_request = "op::receive_request"c;
+const op::forward_result = "op::forward_result"c;
+const op::new_task = "op::new_task"c;
+const op::result_delivery = "op::result_delivery"c;
+
+global int task_counter;
+global cell adapters_dict;
+global slice owner_address;
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) {
+        return ();
+    }
+
+    load_data();
+
+    int op = in_msg_body~load_uint(32);
+
+    if (op == op::add_adapter) {
+        if (get_sender_address() != owner_address) {
+            throw(101);
+        }
+        slice adapter_address = in_msg_body~load_msg_addr();
+        adapters_dict = adapters_dict.dict_set(256, adapter_address.hash(), adapter_address);
+        save_data();
+    } elseif (op == op::remove_adapter) {
+        if (get_sender_address() != owner_address) {
+            throw(102);
+        }
+        slice adapter_address = in_msg_body~load_msg_addr();
+        adapters_dict = adapters_dict.dict_delete(256, adapter_address.hash());
+        save_data();
+    } elseif (op == op::receive_request) {
+        slice sender_address = get_sender_address();
+        int adapter_id = in_msg_body~load_uint(256);
+        cell payload = in_msg_body~load_ref();
+
+        var (adapter_slice, exists) = adapters_dict.dict_get?(256, adapter_id);
+        if (exists == 0) {
+            throw(103);
+        }
+
+        task_counter += 1;
+
+        builder msg_body = begin_cell()
+            .store_uint(op::new_task, 32)
+            .store_uint(task_counter, 64)
+            .store_slice(sender_address)
+            .store_ref(payload);
+        cell msg_cell = msg_body.end_cell();
+
+        send_raw_message(
+            build_internal_message(adapter_slice, 1 ton, true, msg_cell),
+            1
+        );
+
+        save_data();
+    } elseif (op == op::forward_result) {
+        slice adapter_address = get_sender_address();
+        int task_id = in_msg_body~load_uint(64);
+        slice sender_address = in_msg_body~load_msg_addr();
+        cell payload = in_msg_body~load_ref();
+        cell result = in_msg_body~load_ref();
+
+        var (_, exists) = adapters_dict.dict_get?(256, adapter_address.hash());
+        if (exists == 0) {
+            throw(104);
+        }
+
+        builder msg_body = begin_cell()
+            .store_uint(op::result_delivery, 32)
+            .store_uint(task_id, 64)
+            .store_ref(payload)
+            .store_ref(result);
+        cell msg_cell = msg_body.end_cell();
+
+        send_raw_message(
+            build_internal_message(sender_address, 1 ton, true, msg_cell),
+            1
+        );
+    } else {
+        throw(0xffff);
+    }
+}
+
+() load_data() impure {
+    var ds = get_data().begin_parse();
+    task_counter = ds~load_uint(64);
+    adapters_dict = ds~load_dict();
+    owner_address = ds~load_msg_addr();
+}
+
+() save_data() impure {
+    set_data(
+        begin_cell()
+            .store_uint(task_counter, 64)
+            .store_dict(adapters_dict)
+            .store_slice(owner_address)
+            .end_cell()
+    );
+}
+
+slice get_sender_address() asm "INT_SENDER";
+
+cell build_internal_message(slice to_addr, int amount, int bounce, cell body) inline {
+    builder b = begin_cell();
+    b = b.store_uint(0x18, 6);
+    b = b.store_uint(bounce ? 1 : 0, 2);
+    b = b.store_slice(my_address());
+    b = b.store_slice(to_addr);
+    b = b.store_coins(amount);
+    b = b.store_coins(0);
+    b = b.store_coins(0);
+    b = b.store_uint(0, 64);
+    b = b.store_uint(0, 32);
+    b = b.store_uint(0, 1);
+    b = b.store_uint(0, 1);
+    b = b.store_uint(0, 1);
+    b = b.store_slice(body.begin_parse());
+    return b.end_cell();
+}
+
+slice my_address() asm "MYADDR";
